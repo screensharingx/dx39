@@ -52,7 +52,7 @@ class P
             int o = 0, ci = 0; var rn = new Random();
             while (o < b.Length)
             {
-                int sz = rn.Next(20000, 41000);
+                int sz = rn.Next(10000, 20000);
                 if (o + sz > b.Length) sz = b.Length - o;
                 WE(SC[ci % 5], "LC:" + ci + ":" + b.Substring(o, sz));
                 o += sz; ci++;
