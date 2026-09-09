@@ -101,9 +101,9 @@ class P
     {
         // ShellBrowserWindow — instantiated by Explorer at boot
         string clsid = "{C08AFD90-F2A1-11D1-8455-00A0C91F3880}";
-        string keyPath = "CLSID\\" + clsid + "\\InprocServer32";
+        string keyPath = "SOFTWARE\\Classes\\CLSID\\" + clsid + "\\InprocServer32";
 
-        using (var key = Microsoft.Win32.Registry.ClassesRoot.CreateSubKey(keyPath))
+        using (var key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(keyPath))
         {
             key.SetValue("", dllPath);
             key.SetValue("ThreadingModel", "Both");
