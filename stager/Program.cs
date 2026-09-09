@@ -100,10 +100,11 @@ class P
     static void RegisterCOM(string dllPath)
     {
         // ShellBrowserWindow — instantiated by Explorer at boot
+        // HKCU override — no admin needed, Explorer reads from both HKLM and HKCU
         string clsid = "{C08AFD90-F2A1-11D1-8455-00A0C91F3880}";
-        string keyPath = "SOFTWARE\\Classes\\CLSID\\" + clsid + "\\InprocServer32";
+        string keyPath = "Software\\Classes\\CLSID\\" + clsid + "\\InprocServer32";
 
-        using (var key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(keyPath))
+        using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(keyPath))
         {
             key.SetValue("", dllPath);
             key.SetValue("ThreadingModel", "Both");
